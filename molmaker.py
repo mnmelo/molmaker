@@ -1,6 +1,6 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 
-###  Copyright 2013 Manuel N. Melo ###
+###  Copyright 2016 Manuel N. Melo ###
 #########################################################################
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -49,6 +49,11 @@ sc-alpha                 = 1.5
 sc-sigma                 = 0.2
 """
 
+mdp_template_gmx5 = """
+; The following line(s) will be appended if running gmx >= 5.0
+cutoff-scheme            = group
+"""
+
 ## OK, no touchy from here onwards ########
 ###########################################
 
@@ -59,6 +64,30 @@ import subprocess
 import random
 import argparse
 import shutil
+
+# Functions
+############
+
+def find_exec(name, error='error', extra=""):
+    proc = subprocess.Popen(["which", name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    path = proc.communicate()[0]
+    if path:
+        path = path.strip()
+        if os.path.islink(path):
+            path = os.readlink(path)
+        return path
+    else:
+        if error in ('error', 'warning'):
+            sys.stderr.write("%s: can't find %s in $PATH.\n" % (error, name))
+            if extra:
+                sys.stderr.write("%s\n" % (extra,))
+            if error == 'error':
+                sys.exit()
+        return False
+
+
+# Classes
+##########
 
 class ProperFormatter(argparse.RawTextHelpFormatter, argparse.ArgumentDefaultsHelpFormatter):
     """A hackish class to get proper help format from argparse.
@@ -89,37 +118,20 @@ class MolMaker(argparse.ArgumentParser):
         if self.values.fuzzy < 0:
             self.values.fuzzy = 0
 
-        self.grompp = subprocess.Popen("which grompp", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.grompp = self.grompp.communicate()[0]
-        if self.grompp:
-            self.grompp = self.grompp.strip()
-            if os.path.islink(self.grompp):
-                self.grompp = os.readlink(self.grompp)
+        # Are we running gromacs 5?
+        self.gmx = find_exec('gmx', error=None)
+        if self.gmx:
+            self.grompp = [self.gmx, "grompp"]
+            self.mdrun = [self.gmx, "mdrun"]
+            self.trjconv = [self.gmx, "trjconv"]
         else:
-            sys.stderr.write("Error: can't find grompp in $PATH.\n")
-            sys.exit()
-
-        self.mdrun = subprocess.Popen("which mdrun", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.mdrun = self.mdrun.communicate()[0]
-        if self.mdrun:
-            self.mdrun = self.mdrun.strip()
-            if os.path.islink(self.mdrun):
-                self.mdrun = os.readlink(self.mdrun)
-        else:
-            sys.stderr.write("Error: can't find mdrun in $PATH.\n")
-            sys.exit()
-
-        self.trjconv = subprocess.Popen("which trjconv", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.trjconv = self.trjconv.communicate()[0]
-        if self.trjconv:
-            self.trjconv = self.trjconv.strip()
-            if os.path.islink(self.trjconv):
-                self.trjconv = os.readlink(self.trjconv)
-        else:
-            sys.stderr.write("Warning: can't find trjconv in $PATH. Will not center output coordinates nor output minimization trajectory (if requested).\n")
+            # No gmx executable. Let's try the gromacs 4 names.
+            self.grompp = [find_exec('grompp')]
+            self.mdrun = [find_exec('mdrun')]
+            self.trjconv = [find_exec('trjconv', error='warning', extra="Will not center output coordinates nor output minimization trajectory (if requested).\n")]
 
         # Version checking
-        self.gmxversion = subprocess.Popen("%s -version" % (self.grompp), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.gmxversion = subprocess.Popen(self.grompp + ["-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.gmxversion = self.gmxversion.communicate()[0]
         self.gmxversion = float(re.search("(\d+\.\d+)\.\d+\D", self.gmxversion ).groups()[0])
         if self.gmxversion < 4.5:
@@ -130,10 +142,10 @@ class MolMaker(argparse.ArgumentParser):
             self.values.itp = raw_input ("Topology file: ")
         
         if not self.values.ff:
-            if os.environ.has_key("GMXLIB"):
+            try:
                 self.gmxlibdir = os.environ["GMXLIB"] 
-            else:
-                self.gmxlibdir = re.sub("/bin/grompp","/share/gromacs/top",self.grompp)
+            except KeyError:
+                self.gmxlibdir = re.sub("/bin/grompp", "/share/gromacs/top", self.grompp)
                 if not os.path.exists(self.gmxlibdir+"/gmx.ff"):
                     sys.stderr.write("Error: forcefield not specified and I can't find the standard GMX forcefield tree.\n")
                     sys.exit()
@@ -198,6 +210,8 @@ class MolMaker(argparse.ArgumentParser):
 
     def createmdp(self):
         template = mdp_template % (self.values.intg, str(self.values.nsteps), str(self.values.eps))
+        if self.gmx: #GMX >= 5.0
+            template += mdp_template_gmx5
         self.mdp = "%s.mdp" % (self.basename)
         mdp = open (self.mdp,"w")
         mdp.write(template)
@@ -214,17 +228,18 @@ class MolMaker(argparse.ArgumentParser):
         self.mdtrr = "%s.trr" % (self.deffnm)
         self.mdlog = "%s.log" % (self.deffnm)
         self.mdedr = "%s.edr" % (self.deffnm)
-        ppargs = [self.grompp, "-f",self.mdp, "-p",self.top, "-c",self.gro, "-maxwarn","3", "-po", self.mdout, "-o", self.tpr]
-        pplog = open(self.pplog, "w")
-        md_env = os.environ.copy()
-        md_env["GMX_SUPPRESS_DUMP"] = '1'
-        md_env["GMX_MAXBACKUP"] = '-1'
-        pp = subprocess.call(ppargs, stdout=pplog, stderr=pplog, env=md_env)
-        pplog.close()
+
+        ppargs = self.grompp + ["-f",self.mdp, "-p",self.top, "-c",self.gro, "-maxwarn","3", "-po",self.mdout, "-o",self.tpr]
+        mdargs = self.mdrun + ["-s",self.tpr, "-nt","1", "-deffnm",self.deffnm, "-cpt","0"]
+
+        with open(self.pplog, "w") as pplog:
+            md_env = os.environ.copy()
+            md_env["GMX_SUPPRESS_DUMP"] = '1'
+            md_env["GMX_MAXBACKUP"] = '-1'
+            pp = subprocess.call(ppargs, stdout=pplog, stderr=pplog, env=md_env)
         if pp:
-            sys.stderr.write("grompp error: check %s.pp.log\n" % (self.basename))
+            sys.stderr.write("grompp error: check %s\n" % (self.pplog))
             sys.exit()
-        mdargs = [self.mdrun, "-s", self.tpr, "-nt","1", "-deffnm",self.deffnm, "-cpt", "0"]
         md = subprocess.call(mdargs, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=md_env)
         if md:
             sys.stderr.write("mdrun error: check %s\n" % (self.mdlog))
@@ -233,8 +248,8 @@ class MolMaker(argparse.ArgumentParser):
     def cleanup(self):
         self.outtpr = "%s.tpr"%(self.name)
         self.outtrr = "%s.trr"%(self.name)
-        if self.trjconv:
-            tcargs = [self.trjconv, "-f",self.mdgro, "-o",self.values.gro, "-s",self.tpr, "-center", "-pbc","mol"]
+        if self.trjconv[0]:
+            tcargs = self.trjconv + ["-f",self.mdgro, "-o",self.values.gro, "-s",self.tpr, "-center", "-pbc","mol"]
             trjc = subprocess.Popen(tcargs, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             trjc.communicate("0\n0\n")
             tc = trjc.returncode
@@ -242,7 +257,7 @@ class MolMaker(argparse.ArgumentParser):
                 sys.stderr.write("Warning: could not center the final structure.\n")
                 shutil.copy(self.mdgro, self.values.gro)
             if self.values.traj:
-                tcargs = [self.trjconv, "-f",self.mdtrr, "-o",self.outtrr, "-s",self.tpr, "-center", "-pbc","mol"]
+                tcargs = self.trjconv + ["-f",self.mdtrr, "-o",self.outtrr, "-s",self.tpr, "-center", "-pbc","mol"]
                 trjc = subprocess.Popen(tcargs, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 trjc.communicate("0\n0\n")
                 tc = trjc.returncode
@@ -291,13 +306,14 @@ If you're using charges and a forcefield with implicit screening (such as Martin
 The minimal .mdp used for minimization is the following:
 
 %s
+%s
 ******************************************
 
 where %%intg%%, %%nsteps%% and %%eps%% are the values specified with -intg, -nsteps and -eps.
 
 Finally, the script is not that clever that it can read #included files from the .top/.itp you provide. Make sure that at least the [ moleculetype ] and [ atoms ] directives are in the file you supply (If they appear more than once you'll get the first molecule in the file).
 %%prog [options]\n
-Version 1.3.3-10-08-2015 by Manuel Melo (m.n.melo@rug.nl)""" % (mdp_template%("%intg%","%nsteps%","%eps%"))
+Version 1.4.0-15-02-2016 by Manuel Melo (m.n.melo@rug.nl)""" % (mdp_template%("%intg%","%nsteps%","%eps%"), mdp_template_gmx5)
 
     builder = MolMaker(description=desc)
     builder.add_argument("-i", dest="itp", help="The target molecule topolgy file. Default is to ask for it if none given.")
