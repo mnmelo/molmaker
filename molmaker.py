@@ -145,9 +145,9 @@ class MolMaker(argparse.ArgumentParser):
             try:
                 self.gmxlibdir = os.environ["GMXLIB"] 
             except KeyError:
-                self.gmxlibdir = re.sub("/bin/grompp.*$", "/share/gromacs/top", self.grompp[0])
-                if not os.path.exists(self.gmxlibdir+"/gmx.ff"):
-                    sys.stderr.write("Error: forcefield not specified and I can't find the standard GMX forcefield tree.\n")
+                self.gmxlibdir = re.sub("/bin/.*$", "/share/gromacs/top", self.grompp[0])
+                if not os.path.exists(self.gmxlibdir):
+                    sys.stderr.write("Error: forcefield not specified and I can't find $GMXLIB.\n")
                     sys.exit()
             tops = os.listdir(self.gmxlibdir)
             ffs = []
