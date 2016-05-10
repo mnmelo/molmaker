@@ -86,6 +86,29 @@ def find_exec(name, error='error', extra=""):
         return False
 
 
+def deduplicate_mdp(mdp_string):
+    """Only keep the last definition of each option.
+
+    Take the MDP file as a string, and returns the new MDP file as a string.
+    Only the last definition of each option is kept. Comments and empty lines
+    are lost in the process.
+    """
+    # Save the options in a dictionary
+    mdp_dict = {}
+    for line in mdp_string.split('\n'):
+        equal_pos = line.find('=')
+        if equal_pos != -1 and not line.lstrip().startswith(';'):
+            key = line[:equal_pos].strip()
+            value = line[equal_pos + 1:].strip()
+            mdp_dict[key] = value
+    # Format the options back to MDP format
+    key_length = max(len(key) for key in mdp_dict.keys())
+    template = '{key:<{length}} = {value}'
+    lines = (template.format(key=key, value=value, length=key_length)
+             for key, value in mdp_dict.items())
+    return '\n'.join(lines)
+
+
 # Classes
 ##########
 
@@ -213,11 +236,11 @@ class MolMaker(argparse.ArgumentParser):
         if self.gmx: #GMX >= 5.0
             template += mdp_template_gmx5
         self.mdp = "%s.mdp" % (self.basename)
-        mdp = open (self.mdp,"w")
-        mdp.write(template)
-        if self.values.xmdp:
-            mdp.write("".join(open(self.values.xmdp).readlines()))
-        mdp.close()
+        with open (self.mdp,"w") as mdp:
+            if self.values.xmdp:
+                template += "".join(open(self.values.xmdp).readlines())
+            template = deduplicate_mdp(template)
+            mdp.write(template)
 
     def minimize(self):
         self.tpr = "%s.tpr" % (self.basename)
