@@ -1,4 +1,4 @@
-molmaker.py version 1.4.0-15-02-2016 by Manuel Melo
+molmaker.py version 1.5.0-26-08-2020 by Manuel Melo
 
 This tool creates a .gro from an .itp file. It works by randomly scattering coordinates along a linear stretch and then performing an evil minimization as VdW and charges are faded in (using the free energy code). As you already guess, it's totally useless for proteins unless you want a linear segment (in which case it works pretty well!).
 
