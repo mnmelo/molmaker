@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-###  Copyright 2016-2020 Manuel N. Melo ###
+###  Copyright 2016-2021 Manuel N. Melo ###
 #########################################################################
 #  This program is free software: you can redistribute it and/or modify
 #  it under the terms of the GNU General Public License as published by
@@ -66,6 +66,14 @@ import argparse
 import shutil
 from pathlib import Path
 import copy
+import warnings
+
+# Constants
+############
+COMMENT = 1
+PREPROCESSING = 2
+comment_pp_chars = {';': COMMENT,
+                    '#': PREPROCESSING}
 
 # Functions
 ############
@@ -88,6 +96,22 @@ def find_exec(names, error='error', extra=''):
             print(msg, file=sys.stderr)
         return False
 
+def is_comment_or_preprocessing(val):
+    '''Returns 1 if a comment, 2 if preprocessing, 0 if neither.'''
+    if not val:
+        return 0
+    try:
+        while True:
+            try:
+                return comment_pp_chars[val]
+            except KeyError:
+                pass
+            oldval, val = val, val[0]
+            if val is oldval:
+                return 0
+    except TypeError:
+        return 0
+
 def convert_val(val):
     try:
         try:
@@ -97,14 +121,33 @@ def convert_val(val):
     except ValueError:
         return str(val)
 
-def clean(line):
-    line = line.split(';')[0]
+def clean(line, keep_preprocessing=True, keep_comments=True):
     line = line.strip()
+    comment_or_pp = is_comment_or_preprocessing(line)
+
+    if ((comment_or_pp is COMMENT and not keep_comments) or
+        (comment_or_pp is PREPROCESSING and not keep_preprocessing)):
+        return None
+    if not keep_comments:
+        line = line.split(';')[0]
+        line = line.strip()
     if not line:
         return None
-    line = line.strip('[]')
-    line = line.strip()
-    return [convert_val(val) for val in line.split()]
+
+    # Let's deal with preprocessing/comments here and pass them (mostly) untouched
+    if comment_or_pp:
+        return [line]
+    # remove possible spaces around directive names
+    if line.startswith('['):
+        line = ''.join(line.split())
+    # comments midway through the line get a bit more special treatment
+    try:
+        line, comment = line.split(';', maxsplit=1)
+        comment = ';' + comment
+        vals = line.split() + [comment]
+    except ValueError:
+        vals = line.split()
+    return [convert_val(val) for val in vals]
 
 
 # Classes
@@ -115,12 +158,39 @@ class ProperFormatter(argparse.RawTextHelpFormatter, argparse.ArgumentDefaultsHe
 
     """
     def __init__(self, *args, **kwargs):
-        super(ProperFormatter, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
 class ITP:
-    def __init__(self, val_lists):
-        self.topology = {}
-        self._parse(val_lists)
+    at_ids = {'moleculetype': 0,
+              'atoms': 1,
+              'bonds': 2,
+              'pairs': 2,
+              'pairs_nb': 2,
+              'angles': 3,
+              'dihedrals': 4,
+              'exclusions': None,
+              'constraints': 2,
+              'settles': 1,
+              'virtual_sites2': 3,
+              'virtual_sites3': 4,
+              'virtual_sites4': 5,
+              'virtual_sitesn': 0,
+              'position_restraints': 1,
+              'distance_restraints': 2,
+              'dihedral_restraints': 4,
+              'orientation_restraints': 2,
+              'angle_restraints': 4,
+              'angle_restraints_z': 2,}
+
+    def __init__(self, val_lists, order_sections=None):
+        self.order_sections = order_sections
+        try:
+            # Constructor from existing topology dictionary
+            val_lists['moleculetype']
+            self.topology = val_lists
+        except TypeError:
+            self.topology = {}
+            self._parse(val_lists)
 
     @property
     def name(self):
@@ -131,18 +201,148 @@ class ITP:
         self.topology['moleculetype'][0][0] = str(newname)
 
     def _parse(self, val_lists):
-        if val_lists[0][0] != 'moleculetype':
-            raise TypeError('Topology doesn\'t start with "moleculetype"')
-        curr_section = None
+        curr_section = pre_section = self.topology['pre_section'] = []
         for vals in val_lists:
-            if len(vals) == 1:
-                self.topology[vals[0]] = []
-                curr_section = self.topology[vals[0]]
+            first_str = str(vals[0])
+            if first_str.startswith('['): # new section
+                section = first_str[1:-1]
+                if curr_section is pre_section:
+                    if section != 'moleculetype':
+                        raise TypeError('Topology doesn\'t start with directive "moleculetype"')
+                elif section == 'moleculetype':
+                    raise TypeError('Directive "moleculetype" is not first in topology.')
+                curr_section = self.topology.setdefault(section, [])
             else:
+                if is_comment_or_preprocessing(vals):
+                    if self.order_sections:
+                        raise ValueError('Section ordering was requested, but '
+                                         'incompatible topology lines are '
+                                         'present (either comment-only lines or '
+                                         'preprocessing directives)')
+                    self.order_sections = False
+                elif curr_section is pre_section:
+                    raise ValueError('Non-comment/preprocessing line before '
+                                     'directive "moleculetype".')
                 curr_section.append(vals)
+
+        if not pre_section:
+            del self.topology['pre_section']
+
         # Make the order predictable
-        for vals in self.topology.values():
-            vals[:] = sorted(vals)
+        if self.order_sections:
+            for section, vals in self.topology.items():
+                if section not in ('pre_section', 'atoms'):
+                    vals[:] = sorted(vals)
+
+    def write(self, outfile):
+        try:
+            OUT = open(outfile, 'w')
+        except TypeError:
+            OUT = outfile
+        with OUT:
+            for section, lines in self.topology.items():
+                if section != 'pre_section':
+                    print(f'[ {section} ]', file=OUT)
+                for line in lines:
+                    if is_comment_or_preprocessing(line):
+                        print(line[0], file=OUT)
+                        continue
+                    at_strs = ' '.join([f'{v:<3}' for v in line[:self.at_ids[section]]])
+                    if self.at_ids[section] is None:  # exclusions' special case
+                        print(f'  {at_strs}', file=OUT)
+                        continue
+                    xtra_strs = ' '.join([f'{v:<5}' for v in line[self.at_ids[section]:]])
+                    print(f'  {at_strs} {xtra_strs}', file=OUT)
+                print(file=OUT)
+            print(file=OUT)
+
+    def renum(self, delta):
+        '''Adds delta to each atom index in the topology and returns a new ITP
+        with the renumbering.
+           Does not change the ITP object in-place!
+        '''
+        new_top = copy.deepcopy(self.topology)
+        for directive, lines in new_top.items():
+            if directive == 'virtual_sitesn':
+                warnings.warn('This topology uses virtual_sitesn, which cannot '
+                              'be automatically renumbered. Please correct '
+                              'those afterwards.')
+            n_ats = self.at_ids[directive]
+            if n_ats == 0: # moleculetype case
+                continue
+            for line in lines:
+                if is_comment_or_preprocessing(line):
+                    continue
+                new_vals = [v + delta for v in line[:n_ats]]
+                line[:n_ats] = new_vals
+        return ITP(new_top, order_sections=False)
+
+    @classmethod
+    def merge(cls, *itps, newname=None):
+        new_itp = ITP(itps[0].topology)
+        for itp in itps[1:]:
+            for directive, lines in itp.topology.items():
+                if directive == 'moleculetype':
+                    continue
+                try:
+                    new_itp.topology[directive].extend(lines)
+                except KeyError:
+                    new_itp.topology[directive] = copy.deepcopy(lines)
+        if newname is not None:
+            new_itp.topology['moleculetype'][0][0] = newname
+        return new_itp
+
+
+class ITPFile:
+    def __init__(self, itp_path, keep_preprocessing=True, keep_comments=False):
+        self.itp_path = Path(itp_path)
+        order_sections = not (keep_preprocessing or keep_comments)
+        self.lines = []
+        for line in open(itp_path):
+            line = clean(line,
+                         keep_preprocessing=keep_preprocessing,
+                         keep_comments=keep_comments)
+            if line:
+                self.lines.append(line)
+
+        linetypes = []
+        mol_starts = []
+        for lineno, line in enumerate(self.lines):
+            val = str(line[0])
+            if val == '[moleculetype]':
+                linetypes.append('molstart')
+                mol_starts.append(lineno)
+            elif val.startswith('['):
+                linetypes.append('section')
+            elif val.startswith(';'):
+                linetypes.append('comment')
+            elif val.startswith('#end'):
+                linetypes.append('directive_pre')
+            elif val.startswith('#'):
+                linetypes.append('directive')
+            else:
+                linetypes.append('val')
+
+        for mol_idx, start_lineno in enumerate(mol_starts):
+            if not start_lineno:  # start_lineno == 0 breaks the reverse slice below
+                continue
+            for count, prev_type in enumerate(linetypes[start_lineno-1::-1]):
+                if prev_type in ('directive_pre', 'val'):
+                    mol_starts[mol_idx] -= count
+                    break
+            else:
+                mol_starts[mol_idx] = 0
+
+        mol_starts.append(None)  # So that the zip trick works for the last slice
+        self.molecules = {}
+        for a, b in zip(mol_starts, mol_starts[1:]):
+            itp = ITP(self.lines[slice(a, b)], order_sections=order_sections)
+            self.molecules[itp.name] = itp
+
+    def write(self, outfile):
+        with open(outfile, 'w') as OUT:
+            for molecule in self.molecules.values():
+                molecule.write(outfile)
 
 
 class MolMaker(argparse.ArgumentParser):
@@ -162,7 +362,7 @@ class MolMaker(argparse.ArgumentParser):
 
         self.gro = self.values.gro
         if not self.gro:
-            self.gro = self.itp.with_suffix('.gro')
+            self.gro = Path(self.itp.with_suffix('.gro').name)
         self.name = self.gro.stem
         if not self.values.tmpprefix:
             sys.exit('Error: -temp-prefix cannot be an empty string.')
@@ -209,25 +409,11 @@ class MolMaker(argparse.ArgumentParser):
                 print('%3i: %s' % (i, ff[:-3]))
             chosenff = int(input('Forcefield to use (number only): '))
             chosenff = ffs[chosenff]
-            self.values.ff = self.gmxlibdir/chosenff
+            self.values.ff = self.gmxlibdir/chosenff/'forcefield.itp'
     
     def getmol(self):
-        molecules = {}
-        curr_molecule = []
-        for line in open(self.itp):
-            line = clean(line)
-            if not line:
-                continue
-            if len(line) == 1 and 'moleculetype' in line:
-                # starting a new molecule. let's process the current one, if it exists
-                if curr_molecule:
-                    itp = ITP(curr_molecule)
-                    molecules[itp.name] = itp
-                    curr_molecule = []
-            curr_molecule.append(line)
-        # The final molecule
-        itp = ITP(curr_molecule)
-        molecules[itp.name] = itp
+        mol_file = ITPFile(self.itp, keep_preprocessing=False, keep_comments=False)
+        molecules = mol_file.molecules
 
         if not molecules:
             sys.exit(f'Error: Wasn\'t able to identify any molecules in {self.itp}.')
@@ -244,22 +430,21 @@ class MolMaker(argparse.ArgumentParser):
         self.molname = self.molecule.name
 
     def createitp(self):
-        if not self.values.keep_constraints:
+        if ('constraints' in self.molecule.topology
+                and not self.values.keep_constraints):
             newbonds = copy.deepcopy(self.molecule.topology['constraints'])
             del self.molecule.topology['constraints']
             for bond in newbonds:
-                bond.append(1000000)
+                try:
+                    bond.append(1000000)
+                except AttributeError:
+                    print(newbonds)
+                    raise
             bonds = self.molecule.topology.setdefault('bonds', [])
             bonds.extend(newbonds)
 
         self.run_itp = self.basename.with_suffix('.itp')
-
-        with open(self.run_itp, 'w') as itp_out:
-            for directive, lines in self.molecule.topology.items():
-                print(f'[ {directive} ]', file=itp_out)
-                for line in lines:
-                    text = '  '.join([str(v) for v in line])
-                    print(text, file=itp_out)
+        self.molecule.write(self.run_itp)
 
     def creategro(self):
         self.atoms = len(self.molecule.topology['atoms'])
@@ -349,7 +534,7 @@ class MolMaker(argparse.ArgumentParser):
                 sys.stderr.write('Warning: could not center the final structure.\n')
                 shutil.copy(self.mdgro, self.gro)
             if self.values.traj:
-                tcargs = self.trjconv + f'-f {self.mdtrr} -o {self.outrr} -s {self.tpr} -center -pbc mol'.split()
+                tcargs = self.trjconv + f'-f {self.mdtrr} -o {self.outtrr} -s {self.tpr} -center -pbc mol'.split()
                 trjc = subprocess.Popen(tcargs, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 trjc.communicate(b'0\n0\n')
                 tc = trjc.returncode
