@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#-*- coding: utf-8 -*-
 
 ###  Copyright 2016-2021 Manuel N. Melo ###
 #########################################################################
@@ -19,21 +20,21 @@
 
 ## Template for the .mdp file #############
 #   edit to suit your needs               #
-#   but leave the %s fields alone!        #
+#   but leave the {} fields alone!        #
 #   (you can set them with option flags)  #
 ###########################################
 
-mdp_template = """
+mdp_template = '''\
 define                   = -DFLEXIBLE
-integrator               = %s
+integrator               = {integrator}
 emtol                    = 0.1
-nsteps                   = %s
+nsteps                   = {nsteps}
 nstxout                  = 1
 nstcgsteep               = 50
 nstlist                  = 1
-ns-type                  = grid 
+ns-type                  = grid
 pbc                      = no
-epsilon_r                = %s
+epsilon_r                = {eps}
 lincs_order              = 8
 lincs_iter               = 2
 continuation             = yes
@@ -47,12 +48,12 @@ couple-intramol          = yes
 sc-power                 = 2
 sc-alpha                 = 1.5
 sc-sigma                 = 0.2
-"""
+'''
 
-mdp_template_gmx5 = """
+mdp_template_gmx5 = '''\
 ; The following line(s) will be appended if running gmx >= 5.0
 cutoff-scheme            = group
-"""
+'''
 
 ## OK, no touchy from here onwards ########
 ###########################################
@@ -82,7 +83,9 @@ def find_exec(names, error='error', extra=''):
     if isinstance(names, str):
         names = (names,)
     for name in names:
-        proc = subprocess.Popen(['which', name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.Popen(['which', name],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
         path = proc.communicate()[0].decode('utf-8')
         if path:
             path = Path(path.strip()).resolve()
@@ -95,6 +98,9 @@ def find_exec(names, error='error', extra=''):
                 sys.exit(msg)
             print(msg, file=sys.stderr)
         return False
+
+def sanitize_filename(fname):
+    return re.sub('[.\/]', '_', fname)
 
 def is_comment_or_preprocessing(val):
     '''Returns 1 if a comment, 2 if preprocessing, 0 if neither.'''
@@ -134,7 +140,7 @@ def clean(line, keep_preprocessing=True, keep_comments=True):
     if not line:
         return None
 
-    # Let's deal with preprocessing/comments here and pass them (mostly) untouched
+    # We deal with preprocessing/comments here and pass them (mostly) untouched
     if comment_or_pp:
         return [line]
     # remove possible spaces around directive names
@@ -153,12 +159,12 @@ def clean(line, keep_preprocessing=True, keep_comments=True):
 # Classes
 ##########
 
-class ProperFormatter(argparse.RawTextHelpFormatter, argparse.ArgumentDefaultsHelpFormatter):
-    """A hackish class to get proper help format from argparse.
-
-    """
+class ProperFormatter(argparse.RawTextHelpFormatter,
+                      argparse.ArgumentDefaultsHelpFormatter):
+    '''A hackish class to get proper help format from argparse.'''
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
 
 class ITP:
     at_ids = {'moleculetype': 0,
@@ -182,7 +188,13 @@ class ITP:
               'angle_restraints': 4,
               'angle_restraints_z': 2,}
 
-    def __init__(self, val_lists, order_sections=None):
+    def __init__(self, val_lists, order_sections=None, parent_collection=None):
+        '''Creates an ITP representation as a dict of directive sections.
+
+        Each section is a list of lists of line values.
+        The first argument should either be a list of cleaned lines, or a
+        dict of sections to make a copy from.'''
+
         self.order_sections = order_sections
         try:
             # Constructor from existing topology dictionary
@@ -191,6 +203,9 @@ class ITP:
         except TypeError:
             self.topology = {}
             self._parse(val_lists)
+        # We register with the parent collection, if given
+        if parent_collection is not None:
+            self.register(parent_collection)
 
     @property
     def name(self):
@@ -208,18 +223,19 @@ class ITP:
                 section = first_str[1:-1]
                 if curr_section is pre_section:
                     if section != 'moleculetype':
-                        raise TypeError('Topology doesn\'t start with directive "moleculetype"')
+                        raise TypeError('Topology doesn\'t start with '
+                                        'directive "moleculetype"')
                 elif section == 'moleculetype':
-                    raise TypeError('Directive "moleculetype" is not first in topology.')
+                    raise TypeError('Directive "moleculetype" is not first '
+                                    'in topology.')
                 curr_section = self.topology.setdefault(section, [])
             else:
                 if is_comment_or_preprocessing(vals):
                     if self.order_sections:
                         raise ValueError('Section ordering was requested, but '
                                          'incompatible topology lines are '
-                                         'present (either comment-only lines or '
-                                         'preprocessing directives)')
-                    self.order_sections = False
+                                         'present (either comment-only lines '
+                                         'or preprocessing directives)')
                 elif curr_section is pre_section:
                     raise ValueError('Non-comment/preprocessing line before '
                                      'directive "moleculetype".')
@@ -247,26 +263,29 @@ class ITP:
                     if is_comment_or_preprocessing(line):
                         print(line[0], file=OUT)
                         continue
-                    at_strs = ' '.join([f'{v:<3}' for v in line[:self.at_ids[section]]])
-                    if self.at_ids[section] is None:  # exclusions' special case
+                    at_strs = ' '.join([f'{v:<3}' for v in
+                                        line[:self.at_ids[section]]])
+                    if self.at_ids[section] is None:  # exclusions special case
                         print(f'  {at_strs}', file=OUT)
                         continue
-                    xtra_strs = ' '.join([f'{v:<5}' for v in line[self.at_ids[section]:]])
-                    print(f'  {at_strs} {xtra_strs}', file=OUT)
+                    xtra_strs = ' '.join([f'{v:<5}' for v in
+                                          line[self.at_ids[section]:]])
+                    print(f'  {at_strs}{" "*bool(at_strs)}{xtra_strs}',
+                          file=OUT)
                 print(file=OUT)
             print(file=OUT)
 
     def renum(self, delta):
-        '''Adds delta to each atom index in the topology and returns a new ITP
-        with the renumbering.
-           Does not change the ITP object in-place!
+        '''Adds delta to each atom index and returns a renumbered ITP
+
+        Does not change the ITP object in-place!
         '''
         new_top = copy.deepcopy(self.topology)
         for directive, lines in new_top.items():
             if directive == 'virtual_sitesn':
-                warnings.warn('This topology uses virtual_sitesn, which cannot '
-                              'be automatically renumbered. Please correct '
-                              'those afterwards.')
+                warnings.warn('This topology uses "virtual_sitesn", which '
+                              'cannot be automatically renumbered. Please '
+                              'correct those afterwards.')
             n_ats = self.at_ids[directive]
             if n_ats == 0: # moleculetype case
                 continue
@@ -276,6 +295,10 @@ class ITP:
                 new_vals = [v + delta for v in line[:n_ats]]
                 line[:n_ats] = new_vals
         return ITP(new_top, order_sections=False)
+
+    def register(self, parent_collection):
+        self.parent_collection = parent_collection
+        self.parent_collection[self.name] = self
 
     @classmethod
     def merge(cls, *itps, newname=None):
@@ -294,7 +317,17 @@ class ITP:
 
 
 class ITPFile:
-    def __init__(self, itp_path, keep_preprocessing=True, keep_comments=False):
+    def __init__(self, itp_path, keep_preprocessing=True, keep_comments=False,
+                 ITPclass=ITP):
+        '''Parses an .itp containing one or more molecules.
+
+        Optionally keeps preprocessing stuf and/or comments.
+        Constructs a dictionary of ITP instances; the actual used ITP class can
+        be overriden as an argument, to allow for customization/subclassing.
+
+        The ITPFile instance is always passed as the first argument to ITPclass
+        initialization.
+        '''
         self.itp_path = Path(itp_path)
         order_sections = not (keep_preprocessing or keep_comments)
         self.lines = []
@@ -324,7 +357,8 @@ class ITPFile:
                 linetypes.append('val')
 
         for mol_idx, start_lineno in enumerate(mol_starts):
-            if not start_lineno:  # start_lineno == 0 breaks the reverse slice below
+            # start_lineno == 0 breaks the reverse slice below
+            if not start_lineno:
                 continue
             for count, prev_type in enumerate(linetypes[start_lineno-1::-1]):
                 if prev_type in ('directive_pre', 'val'):
@@ -333,26 +367,49 @@ class ITPFile:
             else:
                 mol_starts[mol_idx] = 0
 
-        mol_starts.append(None)  # So that the zip trick works for the last slice
+        # So that the zip trick works for the last slice
+        mol_starts.append(None)
         self.molecules = {}
         for a, b in zip(mol_starts, mol_starts[1:]):
-            itp = ITP(self.lines[slice(a, b)], order_sections=order_sections)
-            self.molecules[itp.name] = itp
+            ITPclass(self.lines[slice(a, b)],
+                     order_sections=order_sections,
+                     parent_collection=self)
+            # The molecule self-registers, so no need to do it here
+            # self.molecules[itp.name] = itp
 
     def write(self, outfile):
         with open(outfile, 'w') as OUT:
             for molecule in self.molecules.values():
                 molecule.write(outfile)
 
+    def __getitem__(self, key):
+        return self.molecules[key]
+
+    def __setitem__(self, key, val):
+        self.molecules[key] = val
+
 
 class MolMaker(argparse.ArgumentParser):
-    def __init__(self, formatter_class=ProperFormatter, *args, **kwargs):
-        argparse.ArgumentParser.__init__(self, *args, formatter_class=formatter_class, **kwargs)
 
-    def checkopts(self, args=sys.argv):
+    top_template = '''\
+#include "{ff_itp}"
+#include "{mol_itp}"
+[ system ]
+{molname}
+[ molecules ]
+{molname}   1
+'''
+
+    def __init__(self, formatter_class=ProperFormatter, *args, **kwargs):
+        argparse.ArgumentParser.__init__(self,
+                                         *args,
+                                         formatter_class=formatter_class,
+                                         **kwargs)
+
+    def checkopts1(self, args=sys.argv):
         self.values = self.parse_args(args)
         #
-        # Input options checking and assignment of defaults not done by argparse.
+        # Options checking and assignment of defaults not done by argparse.
         self.itp = self.values.itp
         if not self.itp:
             self.itp = Path(input('Topology file: '))
@@ -360,13 +417,8 @@ class MolMaker(argparse.ArgumentParser):
         if not self.itp.exists():
             sys.exit('Error: can\'t find the specified topology file.')
 
-        self.gro = self.values.gro
-        if not self.gro:
-            self.gro = Path(self.itp.with_suffix('.gro').name)
-        self.name = self.gro.stem
         if not self.values.tmpprefix:
             sys.exit('Error: -temp-prefix cannot be an empty string.')
-        self.basename = self.gro.with_name(self.values.tmpprefix + self.name)
 
         self.values.fuzzy = max(self.values.fuzzy, 0)
 
@@ -382,13 +434,22 @@ class MolMaker(argparse.ArgumentParser):
             # No gmx executable. Let's try the gromacs 4 names.
             self.grompp = [find_exec('grompp')]
             self.mdrun = [find_exec('mdrun')]
-            self.trjconv = [find_exec('trjconv', error='warning', extra='Will not center output coordinates nor output minimization trajectory (if requested).')]
-            self.editconf = [find_exec('editconf', error='warning', extra='Will not be able to process single-atom topologies.')]
+            self.trjconv = [find_exec('trjconv', error='Warning',
+                                      extra='Will not center output '
+                                            'coordinates nor output '
+                                            'minimization trajectory '
+                                            '(if requested).')]
+            self.editconf = [find_exec('editconf', error='Warning',
+                                       extra='Will not be able to process '
+                                             'single-atom topologies.')]
 
         # Version checking
-        self.gmxversion = subprocess.Popen(self.grompp + ["-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.gmxversion = subprocess.Popen(self.grompp + ["-version"],
+                                           stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE)
         self.gmxversion = self.gmxversion.communicate()[0].decode('utf-8')
-        self.gmxversion = float(re.search('\D(\d+\.\d+)(\.\d+)?\D', self.gmxversion ).groups()[0])
+        self.gmxversion = float(re.search('\D(\d+\.\d+)(\.\d+)?\D',
+                                          self.gmxversion ).groups()[0])
         if self.gmxversion < 4.5:
             sys.exit('Error: GMX version must be 4.5 or higher.')
         elif self.gmxversion >= 2020:
@@ -400,23 +461,35 @@ class MolMaker(argparse.ArgumentParser):
             except KeyError:
                 self.gmxlibdir = self.grompp[0].parents[1]/'share/gromacs/top'
             if not self.gmxlibdir.exists():
-                sys.exit('Error: forcefield not specified and I can\'t find the standard GMX forcefield tree.')
+                sys.exit('Error: forcefield not specified and I can\'t find '
+                         'the standard GMX forcefield tree.')
 
-            ffs = [top.name for top in self.gmxlibdir.iterdir() if top.suffix == '.ff']
+            ffs = [top.name for top in self.gmxlibdir.iterdir()
+                   if top.suffix == '.ff']
             if not ffs:
-                sys.exit('Error: forcefield not specified and I can\'t find any in $GMXLIB.')
+                sys.exit('Error: forcefield not specified and I can\'t find '
+                         'any in $GMXLIB.')
             for i, ff in enumerate(ffs):
                 print('%3i: %s' % (i, ff[:-3]))
             chosenff = int(input('Forcefield to use (number only): '))
             chosenff = ffs[chosenff]
             self.values.ff = self.gmxlibdir/chosenff/'forcefield.itp'
-    
+
+    def checkopts2(self):
+        self.gro = self.values.gro
+        if not self.gro:
+            self.gro = Path(self.molname).with_suffix('.gro')
+        self.name = sanitize_filename(self.gro.stem)
+        self.basename = self.gro.with_name(self.values.tmpprefix + self.name)
+
     def getmol(self):
-        mol_file = ITPFile(self.itp, keep_preprocessing=False, keep_comments=False)
+        mol_file = ITPFile(self.itp, keep_preprocessing=False,
+                           keep_comments=False)
         molecules = mol_file.molecules
 
         if not molecules:
-            sys.exit(f'Error: Wasn\'t able to identify any molecules in {self.itp}.')
+            sys.exit(f'Error: Wasn\'t able to identify any molecules '
+                      'in {self.itp}.')
 
         if len(molecules) == 1:
             self.molecule = molecules[list(molecules.keys())[0]]
@@ -435,12 +508,15 @@ class MolMaker(argparse.ArgumentParser):
             newbonds = copy.deepcopy(self.molecule.topology['constraints'])
             del self.molecule.topology['constraints']
             for bond in newbonds:
-                try:
-                    bond.append(1000000)
-                except AttributeError:
-                    print(newbonds)
-                    raise
-            bonds = self.molecule.topology.setdefault('bonds', [])
+                bond.append(1000000)
+
+            if 'bonds' not in self.molecule.topology:
+                # must add bonds, but ensure exclusions come last
+                bonds = self.molecule.topology['bonds'] = []
+                if 'exclusions' in self.molecule.topology:
+                    exc = self.molecule.topology.pop('exclusions')
+                    self.molecule.topology['exclusions'] = exc
+
             bonds.extend(newbonds)
 
         self.run_itp = self.basename.with_suffix('.itp')
@@ -448,7 +524,7 @@ class MolMaker(argparse.ArgumentParser):
 
     def creategro(self):
         self.atoms = len(self.molecule.topology['atoms'])
-        
+
         self.init_gro = self.basename.with_suffix('.gro')
         with open(self.init_gro, 'w') as gro:
             print(self.molname, file=gro)
@@ -457,27 +533,25 @@ class MolMaker(argparse.ArgumentParser):
                 print('%5d%-5s%5s%5d%8.3f%8.3f%8.3f'
                       % (i+1,"DUM","DUM",i+1,
                          0.05*i,
-                         self.values.fuzzy*random.random()+0.025*self.atoms-0.5*self.values.fuzzy,
-                         self.values.fuzzy*random.random()+0.025*self.atoms-0.5*self.values.fuzzy),
+                         self.values.fuzzy*random.random()+0.025
+                           *self.atoms-0.5*self.values.fuzzy,
+                         self.values.fuzzy*random.random()+0.025
+                           *self.atoms-0.5*self.values.fuzzy),
                       file=gro)
             box_len = max(0.2*self.atoms, 2.0)
             print('%f %f %f' % (box_len, box_len, box_len), file=gro)
-    
+
     def createtop(self):
-        template = '''#include "%s"
-#include "%s"
-[ system ]
-%s
-[ molecules ]
-%s   1
-'''
         self.top = self.basename.with_suffix('.top')
-        top = open(self.top, 'w')
-        top.write(template % (self.values.ff.resolve(), self.run_itp.resolve(), self.molname, self.molname))
-        top.close()
+        with open(self.top, 'w') as top:
+            top.write(self.top_template.format(ff_itp=self.values.ff.resolve(),
+                                               mol_itp=self.run_itp.resolve(),
+                                               molname=self.molname))
 
     def createmdp(self):
-        template = mdp_template % (self.values.intg, str(self.values.nsteps), str(self.values.eps))
+        template = mdp_template.format(integrator=self.values.intg,
+                                       nsteps=self.values.nsteps,
+                                       eps=self.values.eps)
         if self.gmx: #GMX >= 5.0
             template += mdp_template_gmx5
         self.mdp = self.basename.with_suffix('.mdp')
@@ -497,54 +571,74 @@ class MolMaker(argparse.ArgumentParser):
         self.mdlog = self.deffnm.with_suffix('.log')
         self.mdedr = self.deffnm.with_suffix('.edr')
 
-        ppargs = self.grompp + f'-f {self.mdp} -p {self.top} -c {self.init_gro} -maxwarn 3 -po {self.mdout} -o {self.tpr}'.split()
-        mdargs = self.mdrun + f'-s {self.tpr} -nt 1 -deffnm {self.deffnm} -cpt 0'.split()
+        ppargs = self.grompp + (f'-f {self.mdp} -p {self.top} '
+                                f'-c {self.init_gro} -maxwarn 3 '
+                                f'-po {self.mdout} -o {self.tpr}'.split())
+        mdargs = self.mdrun + (f'-s {self.tpr} -nt 1 '
+                               f'-deffnm {self.deffnm} -cpt 0'.split())
 
         with open(self.pplog, 'w') as pplog:
             md_env = os.environ.copy()
             md_env['GMX_SUPPRESS_DUMP'] = '1'
             md_env['GMX_MAXBACKUP'] = '-1'
-            pp = subprocess.call(ppargs, stdout=pplog, stderr=pplog, env=md_env)
+            pp = subprocess.call(ppargs, stdout=pplog, stderr=pplog,
+                                 env=md_env)
         if pp:
             sys.exit(f'grompp error: check {self.pplog}')
         with open(self.mdlog, 'w') as mdlog:
             if self.atoms > 1:
-                md = subprocess.call(mdargs, stdout=mdlog, stderr=mdlog, env=md_env)
+                md = subprocess.call(mdargs, stdout=mdlog, stderr=mdlog,
+                                     env=md_env)
                 if md:
                     sys.exit(f'mdrun error: check {self.mdlog}')
             else:
-                # The minimization gives all 'nan' in this case, let's just replace
-                #  with the .tpr structure
+                # The minimization gives all 'nan' in this case, let's just
+                #  replace with the .tpr structure
                 if not self.editconf[0]:
-                    sys.exit(f'Cannot handle single-atom topologies because no \'editconf\' executable was found.')
-                ecargs = self.editconf + f'-f {self.tpr} -o {self.deffnm}.gro'.split()
-                ec = subprocess.call(ecargs, stdout=mdlog, stderr=mdlog, env=md_env)
+                    sys.exit('Cannot handle single-atom topologies because '
+                             'no \'editconf\' executable was found.')
+                ecargs = self.editconf + (f'-f {self.tpr} '
+                                          f'-o {self.deffnm}.gro'.split())
+                ec = subprocess.call(ecargs, stdout=mdlog, stderr=mdlog,
+                                     env=md_env)
                 if ec:
-                    sys.exit(f'Error creating single-atom structure: check {self.mdlog}')
+                    sys.exit('Error creating single-atom structure: '
+                             f'check {self.mdlog}')
 
     def cleanup(self):
         self.outtpr = self.gro.with_suffix('.tpr')
         self.outtrr = self.gro.with_suffix('.trr')
         if self.trjconv[0]:
-            tcargs = self.trjconv + f'-f {self.mdgro} -o {self.gro} -s {self.tpr} -center -pbc mol'.split()
-            trjc = subprocess.Popen(tcargs, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            tcargs = self.trjconv + (f'-f {self.mdgro} -o {self.gro} '
+                                     f'-s {self.tpr} -center -pbc mol'.split())
+            trjc = subprocess.Popen(tcargs,
+                                    stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE)
             trjc.communicate(b'0\n0\n')
             tc = trjc.returncode
             if tc:
-                sys.stderr.write('Warning: could not center the final structure.\n')
+                print('Warning: could not center '
+                      'the final structure.', file=sys.stderr)
                 shutil.copy(self.mdgro, self.gro)
             if self.values.traj:
-                tcargs = self.trjconv + f'-f {self.mdtrr} -o {self.outtrr} -s {self.tpr} -center -pbc mol'.split()
-                trjc = subprocess.Popen(tcargs, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                tcargs = self.trjconv + (f'-f {self.mdtrr} -o {self.outtrr} '
+                                         f'-s {self.tpr} -center '
+                                         f'-pbc mol'.split())
+                trjc = subprocess.Popen(tcargs,
+                                        stdin=subprocess.PIPE,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE)
                 trjc.communicate(b'0\n0\n')
                 tc = trjc.returncode
                 if tc:
-                    sys.stderr.write("Warning: could not center the trajectory.\n")
+                    print('Warning: could not center '
+                          'the trajectory.', file=sys.stderr)
         else:
             shutil.copy(self.mdgro, self.gro)
         if self.values.traj:
             shutil.copy(self.tpr, self.outtpr)
-            
+
         if not self.values.keep:
             for fname in [self.run_itp, self.init_gro, self.top, self.mdp,
                           self.mdout, self.pplog, self.tpr, self.mdgro,
@@ -554,8 +648,10 @@ class MolMaker(argparse.ArgumentParser):
                 except FileNotFoundError:
                     pass
 
-    def justdoit(self):
+    def justdoit(self, args):
+        self.checkopts1(args)
         self.getmol()
+        self.checkopts2()
         self.createitp()
         self.creategro()
         self.createmdp()
@@ -571,51 +667,97 @@ def main(argv=None):
         argv = sys.argv[1:]
     #
     # Option parsing and 'documentation'.
-    desc ="""
+    desc ='''\
 ******************************************
-molmaker.py attempts to generate a structure from a GROMACS .itp and a forcefield, by minimizing initially semi-random coordinates while slowly fading in nonbonded interactions.
+molmaker.py attempts to generate a structure from a GROMACS .itp and a
+forcefield, by minimizing initially semi-random coordinates while slowly fading
+in nonbonded interactions. It uses the free-energy code for this soft-core
+potential fading, which means that your molecule should be compatible with
+such potential de-coupling.
 
-It is hopeless to use this for molecules with many degrees of freedom, especially if they're somewhat coiled or branched (try increasing the fuzziness in these cases). It does work out well for creating linear stretches of protein.
+It is hopeless to use this for molecules with many degrees of freedom,
+especially if they\'re somewhat coiled or branched (try increasing the
+fuzziness in these cases). It does work out well for creating linear stretches
+of protein.
 
-The script will always try to do the RightThing(TM), but it'll need help at times, namely a) if you're using a custom forcefield not present under the $GMXLIB path, and b) if your molecule requires exotic .mdp directives to minimize properly.
+The script will try to do the RightThing™, but it\'ll need help at times,
+namely a) if you\'re using a custom forcefield not present under the $GMXLIB
+path, and b) if your molecule requires exotic .mdp directives to minimize
+properly.
 
-The used VdW and Coulombic interactions are cutoff at 1nm. If potential shapes/cuttoffs really are important, the .mdp template is readily editable at the top of the script.
+The used VdW and Coulombic interactions are cutoff at 1nm. If potential
+shapes/cuttoffs really are important, the .mdp template is readily editable at
+the top of the script.
 
-If you're using charges and a forcefield with implicit screening (such as Martini) you'll want to set -eps to something else than the default.
+If you\'re using charges and a forcefield with implicit screening (such as
+Martini) you\'ll want to set -eps to something else than the default.
 
-By default, constraints in the topology are converted to harmonic bonds with 1e6 kJ/mol/nm^2 force constant.
+By default, constraints in the topology are converted to harmonic bonds with
+1e6 kJ/mol/nm^2 force constant.
 
 The minimal .mdp used for minimization is the following:
 
-%s
-%s
+{mdp}
+{mdpgmx5}
 ******************************************
 
-where %%intg%%, %%nsteps%% and %%eps%% are the values specified with -intg, -nsteps and -eps.
+where %%intg%%, %%nsteps%% and %%eps%% are the values specified with -intg,
+-nsteps and -eps.
 
-Finally, the script is not that clever that it can read #included files from the .top/.itp you provide. Make sure that at least the [ moleculetype ] and [ atoms ] directives are in the file you supply. If they appear more than once you'll get to choose the molecule you want, or you can preempt that with -mol.
+Finally, the script is not that clever that it can read #included files from
+the .top/.itp you provide. Make sure that at least the [ moleculetype ] and
+[ atoms ] directives are in the file you supply. If they appear more than once
+you\'ll get to choose the molecule you want, or you can preempt that with -mol.
 
-Version 2.1.0-30-06-2020 by Manuel Melo (m.n.melo@itqb.unl.pt)""" % (mdp_template%("%intg%","%nsteps%","%eps%"), mdp_template_gmx5)
+Version 2.2.0-04-07-2021 by Manuel Melo (m.n.melo@itqb.unl.pt)'''.format(
+        mdp=mdp_template.format(integrator='%intg%',
+                                nsteps='%nsteps%',
+                                eps='%eps%'),
+        mdpgmx5=mdp_template_gmx5)
 
     builder = MolMaker(description=desc)
-    builder.add_argument('-i', dest='itp', type=Path, help='The target molecule topolgy file. Default is to ask for it if none given.')
-    builder.add_argument('-x', dest='xmdp', type=Path, help='File with extra directives to include in the minimization .mdp.')
-    builder.add_argument('-ff', dest='ff', type=Path, help='The forcefield itp. Default is to ask for it if none given. You\'ll most likely want to use this flag if using the MARTINI CG forcefield.')
-    builder.add_argument('-o', dest='gro', type=Path, help='The output .gro file. Default is to infer from the topology file.')
-    builder.add_argument('-mol', default=None, help='Which molecule to convert, in case there are multiple in the topology file.')
-    builder.add_argument('-temp-prefix', dest='tmpprefix', default='.molmk_', help='The prefix of the temp files.')
-    builder.add_argument('-fuzzy', type=float, dest='fuzzy', default=2, help='Fuzziness of the randomly placed initial coordinates.')
-    builder.add_argument('-keep', action='store_true', dest='keep', help='Whether to keep all temporary output files (note that these will be hidden by default anyway).')
-    builder.add_argument('-traj', action='store_true', dest='traj', help='Whether to save the minimization trajectory and a .tpr file.')
-    builder.add_argument('-intg', dest="intg", default='cg', help='The energy-minimization integrator to use.')
-    builder.add_argument('-nsteps', type=int, dest='nsteps', default=5000, help='Maximum number of steps in minimization (might be useful to limit this for CG minimizations).')
-    builder.add_argument('-eps', type=float, dest='eps', default=1.0, help='The relative dielectric constant.')
-    builder.add_argument('-constr', dest='keep_constraints', action='store_true', help='Whether to keep constraints as such, instead of converting to harmonic bonds.')
-    
-    builder.checkopts(args=argv)
-    builder.justdoit()
+    builder.add_argument('-i', dest='itp', type=Path,
+                         help='The target molecule topolgy file. Default is '
+                              'to ask for it if none given.')
+    builder.add_argument('-x', dest='xmdp', type=Path,
+                         help='File with extra directives to include in the '
+                              'minimization .mdp.')
+    builder.add_argument('-ff', dest='ff', type=Path,
+                         help='The forcefield itp. Default is to ask for it '
+                              'if none given. You\'ll most likely want to use '
+                              'this flag if using the MARTINI CG forcefield.')
+    builder.add_argument('-o', dest='gro', type=Path,
+                         help='The output .gro file. Default is to infer from '
+                              'the topology file.')
+    builder.add_argument('-mol', default=None,
+                         help='Which molecule to convert, in case there are '
+                              'multiple in the topology file.')
+    builder.add_argument('-temp-prefix', dest='tmpprefix', default='.molmk_',
+                         help='The prefix of the temp files.')
+    builder.add_argument('-fuzzy', type=float, dest='fuzzy', default=2,
+                         help='Fuzziness of the randomly placed '
+                              'initial coordinates.')
+    builder.add_argument('-traj', action='store_true', dest='traj',
+                         help='Whether to save the minimization trajectory '
+                              'and a .tpr file.')
+    builder.add_argument('-keep', action='store_true', dest='keep',
+                         help='Whether to keep all temporary output files '
+                              '(note that these will be hidden by default '
+                              'anyway).')
+    builder.add_argument('-intg', dest="intg", default='cg',
+                         help='The energy-minimization integrator to use.')
+    builder.add_argument('-nsteps', type=int, dest='nsteps', default=5000,
+                         help='Maximum number of steps in minimization '
+                              '(might be useful to limit this for '
+                              'CG minimizations).')
+    builder.add_argument('-eps', type=float, dest='eps', default=1.0,
+                         help='The relative dielectric constant.')
+    builder.add_argument('-constr', dest='keep_constraints',
+                         action='store_true',
+                         help='Whether to keep constraints as such, '
+                              'instead of converting to harmonic bonds.')
+
+    builder.justdoit(args=argv)
 
 if __name__ == '__main__':
     sys.exit(main())
-
-
