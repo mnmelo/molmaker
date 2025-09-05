@@ -25,34 +25,30 @@
 ###########################################
 
 mdp_template = '''\
-define                   = -DFLEXIBLE
-integrator               = {integrator}
-emtol                    = 0.1
-nsteps                   = {nsteps}
-nstxout                  = 1
-nstcgsteep               = 50
-nstlist                  = 1
-ns-type                  = grid
-pbc                      = no
-epsilon_r                = {eps}
-lincs_order              = 8
-lincs_iter               = 2
-continuation             = yes
-free-energy              = yes
-init-lambda              = 0
-delta-lambda             = 0.002
-couple-moltype           = system
-couple-lambda0           = none
-couple-lambda1           = vdw-q
-couple-intramol          = yes
-sc-power                 = 2
-sc-alpha                 = 1.5
-sc-sigma                 = 0.2
-'''
+define            = -DFLEXIBLE
+integrator        = {integrator}
+emtol             = 0.1
+nsteps            = {nsteps}
+nstxout           = {nstxout}
+nstcgsteep        = 50
 
-mdp_template_gmx5 = '''\
-; The following line(s) will be appended if running gmx >= 5.0
-cutoff-scheme            = group
+rlist             = {rlist}
+rcoulomb          = {rcoulomb}
+rvdw              = {rvdw}
+epsilon_r         = {eps}
+
+lincs_order       = 8
+lincs_iter        = 2
+continuation      = yes
+
+free-energy       = yes
+init-lambda       = 0
+delta-lambda      = {delta_lambda}
+couple-moltype    = system
+couple-lambda0    = none
+couple-lambda1    = vdw-q
+couple-intramol   = yes
+sc-function       = gapsys
 '''
 
 ## OK, no touchy from here onwards ########
@@ -560,37 +556,23 @@ class MolMaker(argparse.ArgumentParser):
         self.values.fuzzy = max(self.values.fuzzy, 0)
 
         # Are we running gromacs >=5?
-        self.gmx = find_exec(('gmx', 'gmx_d', 'gmx_mpi'), error=None)
+        self.gmx = find_exec(('gmx', 'gmx_d', 'gmx_mpi', 'gmx_mpi_d'),
+                             error=None)
 
-        if self.gmx:
-            self.grompp = [self.gmx, "grompp"]
-            self.mdrun = [self.gmx, "mdrun"]
-            self.trjconv = [self.gmx, "trjconv"]
-            self.editconf = [self.gmx, "editconf"]
-        else:
-            # No gmx executable. Let's try the gromacs 4 names.
-            self.grompp = [find_exec('grompp')]
-            self.mdrun = [find_exec('mdrun')]
-            self.trjconv = [find_exec('trjconv', error='Warning',
-                                      extra='Will not center output '
-                                            'coordinates nor output '
-                                            'minimization trajectory '
-                                            '(if requested).')]
-            self.editconf = [find_exec('editconf', error='Warning',
-                                       extra='Will not be able to process '
-                                             'single-atom topologies.')]
+        self.grompp = [self.gmx, "grompp"]
+        self.mdrun = [self.gmx, "mdrun"]
+        self.trjconv = [self.gmx, "trjconv"]
+        self.editconf = [self.gmx, "editconf"]
 
-        # Version checking
-        self.gmxversion = subprocess.Popen(self.grompp + ["-version"],
-                                           stdout=subprocess.PIPE,
-                                           stderr=subprocess.PIPE)
-        self.gmxversion = self.gmxversion.communicate()[0].decode('utf-8')
-        self.gmxversion = float(re.search('\D(\d+\.\d+)(\.\d+)?\D',
-                                          self.gmxversion ).groups()[0])
-        if self.gmxversion < 4.5:
-            sys.exit('Error: GMX version must be 4.5 or higher.')
-        elif self.gmxversion >= 2020:
-            sys.exit('Error: GMX versions 2020 and greater are not supported.')
+        ## Version checking
+        #self.gmxversion = subprocess.Popen(self.grompp + ["-version"],
+        #                                   stdout=subprocess.PIPE,
+        #                                   stderr=subprocess.PIPE)
+        #self.gmxversion = self.gmxversion.communicate()[0].decode('utf-8')
+        #self.gmxversion = float(re.search('\D(\d+\.\d+)(\.\d+)?\D',
+        #                                  self.gmxversion ).groups()[0])
+        #if self.gmxversion < 4.5:
+        #    sys.exit('Error: GMX version must be 4.5 or higher.')
 
         if not self.values.ff:
             try:
@@ -666,17 +648,22 @@ class MolMaker(argparse.ArgumentParser):
         with open(self.init_gro, 'w') as gro:
             print(self.molname, file=gro)
             print(self.atoms, file=gro)
+            xs = []
+            ys = []
+            zs = []
             for i in range(self.atoms):
+                x = 0.05*i
+                y = self.values.fuzzy * (random.random() - .5) + 0.025 * self.atoms 
+                z = self.values.fuzzy * (random.random() - .5) + 0.025 * self.atoms 
+                xs.append(x)
+                ys.append(y)
+                zs.append(z)
                 print('%5d%-5s%5s%5d%8.3f%8.3f%8.3f'
-                      % (i+1,"DUM","DUM",i+1,
-                         0.05*i,
-                         self.values.fuzzy*random.random()+0.025
-                           *self.atoms-0.5*self.values.fuzzy,
-                         self.values.fuzzy*random.random()+0.025
-                           *self.atoms-0.5*self.values.fuzzy),
-                      file=gro)
-            box_len = max(0.2*self.atoms, 2.0)
+                      % (i+1,"DUM","DUM",i+1,x,y,z),file=gro)
+            box_len = max([max(dim) - min(dim) for dim in (xs, ys, zs)]) * 2
+            box_len = max(box_len, 5.0)
             print('%f %f %f' % (box_len, box_len, box_len), file=gro)
+        return box_len
 
     def createtop(self):
         self.top = self.basename.with_suffix('.top')
@@ -685,12 +672,15 @@ class MolMaker(argparse.ArgumentParser):
                                                mol_itp=self.run_itp.resolve(),
                                                molname=self.molname))
 
-    def createmdp(self):
+    def createmdp(self, cutoff=1.2):
         template = mdp_template.format(integrator=self.values.intg,
                                        nsteps=self.values.nsteps,
-                                       eps=self.values.eps)
-        if self.gmx: #GMX >= 5.0
-            template += mdp_template_gmx5
+                                       nstxout=int(self.values.traj or self.values.keep),
+                                       eps=self.values.eps,
+                                       rlist=cutoff,
+                                       rcoulomb=cutoff,
+                                       rvdw=cutoff,
+                                       delta_lambda=1/self.values.nsteps)
         self.mdp = self.basename.with_suffix('.mdp')
         mdp = open (self.mdp, 'w')
         mdp.write(template)
@@ -790,8 +780,8 @@ class MolMaker(argparse.ArgumentParser):
         self.getmol()
         self.checkopts2()
         self.createitp()
-        self.creategro()
-        self.createmdp()
+        box_len = self.creategro()
+        self.createmdp(cutoff=box_len/2.15)
         self.createtop()
         self.minimize()
         self.cleanup()
@@ -835,7 +825,6 @@ By default, constraints in the topology are converted to harmonic bonds with
 The minimal .mdp used for minimization is the following:
 
 {mdp}
-{mdpgmx5}
 ******************************************
 
 where %%intg%%, %%nsteps%% and %%eps%% are the values specified with -intg,
@@ -846,11 +835,15 @@ the .top/.itp you provide. Make sure that at least the [ moleculetype ] and
 [ atoms ] directives are in the file you supply. If they appear more than once
 you\'ll get to choose the molecule you want, or you can preempt that with -mol.
 
-Version 2.2.0-04-07-2021 by Manuel Melo (m.n.melo@itqb.unl.pt)'''.format(
+Version 3.0.0-05-09-2025 by Manuel Melo (m.n.melo@itqb.unl.pt)'''.format(
         mdp=mdp_template.format(integrator='%intg%',
                                 nsteps='%nsteps%',
-                                eps='%eps%'),
-        mdpgmx5=mdp_template_gmx5)
+                                nstxout='*0, or 1 if -keep/-traj is passed*',
+                                eps='%eps%',
+                                rlist='*dependent on system size*',
+                                rcoulomb='*dependent on system size*',
+                                rvdw='*dependent on system size*',
+                                delta_lambda='1/%nsteps%'))
 
     builder = MolMaker(description=desc)
     builder.add_argument('-i', dest='itp', type=Path,
