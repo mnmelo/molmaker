@@ -106,17 +106,17 @@ def is_comment_or_preprocessing(val):
     '''Returns 1 if a comment, 2 if preprocessing, 0 if neither.'''
     if not val:
         return 0
-    try:
-        while True:
-            try:
-                return comment_pp_chars[val]
-            except KeyError:
-                pass
+
+    # Unpack the vals to get the very first character
+    while True:
+        try:
             oldval, val = val, val[0]
-            if val is oldval:
-                return 0
-    except TypeError:
-        return 0
+        except (TypeError, IndexError):
+            break
+        if val is oldval:
+            break
+
+    return comment_pp_chars.get(val, 0)
 
 def convert_val(val):
     try:
@@ -155,6 +155,27 @@ def clean(line, keep_preprocessing=True, keep_comments=True):
         vals = line.split()
     return [convert_val(val) for val in vals]
 
+def get_format_lens(lines, nats=None, minlen=3):
+    formats = []
+    for line in lines:
+        if is_comment_or_preprocessing(line):
+            continue
+        for i, val in enumerate(line):
+            if is_comment_or_preprocessing(val):
+                break
+            val_len = len(str(val))
+            try:
+                formats[i] = max(formats[i], val_len)
+            except IndexError:
+                formats.append(max(val_len, minlen))
+    if nats is None:
+        # Cool/hackish way to do an infinite iterator without
+        # having to import itertools
+        return iter(lambda:max(formats), 0)
+    if nats > 1:
+        formats[:nats] = [max(formats[:nats])] * nats
+    return formats
+
 
 # Classes
 ##########
@@ -167,7 +188,9 @@ class ProperFormatter(argparse.RawTextHelpFormatter,
 
 
 class ITP:
-    at_ids = {'moleculetype': 0,
+    at_ids = {'pre_section': 0,
+              'post_section': 0,
+              'moleculetype': 0,
               'atoms': 1,
               'bonds': 2,
               'pairs': 2,
@@ -180,7 +203,7 @@ class ITP:
               'virtual_sites2': 3,
               'virtual_sites3': 4,
               'virtual_sites4': 5,
-              'virtual_sitesn': 0,
+              'virtual_sitesn': None,
               'position_restraints': 1,
               'distance_restraints': 2,
               'dihedral_restraints': 4,
@@ -188,7 +211,7 @@ class ITP:
               'angle_restraints': 4,
               'angle_restraints_z': 2,}
 
-    def __init__(self, val_lists, order_sections=None, parent_collection=None):
+    def __init__(self, val_lists=None, moleculetype='default', nrexc=3, order_sections=None, parent_collection=None):
         '''Creates an ITP representation as a dict of directive sections.
 
         Each section is a list of lists of line values.
@@ -196,15 +219,24 @@ class ITP:
         dict of sections to make a copy from.'''
 
         self.order_sections = order_sections
-        try:
-            # Constructor from existing topology dictionary
-            val_lists['moleculetype']
-            self.topology = val_lists
-        except TypeError:
-            self.topology = {}
-            self._parse(val_lists)
+        if val_lists is None:
+            self.topology = {'moleculetype': [[moleculetype, nrexc]]}
+        else:
+            try:
+                # Constructor from existing topology dictionary
+                val_lists['moleculetype']
+                self.topology = copy.deepcopy(val_lists)
+            except TypeError:
+                self.topology = {}
+                self._parse(val_lists)
         # We register with the parent collection, if given
         if parent_collection is not None:
+            if ('pre_section' not in self.topology
+                    and parent_collection.molecules):
+                post_section = parent_collection[-1].topology.pop('post_section',
+                                                                  None)
+                if post_section is not None:
+                    self.topology['pre_section'] = post_section
             self.register(parent_collection)
 
     @property
@@ -237,9 +269,20 @@ class ITP:
                                          'present (either comment-only lines '
                                          'or preprocessing directives)')
                 elif curr_section is pre_section:
-                    raise ValueError('Non-comment/preprocessing line before '
-                                     'directive "moleculetype".')
+                    raise ValueError(f'Non-comment/preprocessing line {vals} '
+                                     'before directive "moleculetype".')
                 curr_section.append(vals)
+    
+        post_section = self.topology['post_section'] = []
+        for line in list(self.topology.values())[-1][::-1]:
+            if is_comment_or_preprocessing(line):
+                post_section.append(line)
+            else:
+                break
+        if post_section:
+            post_section[:] = post_section[::-1]
+        else:
+            del self.topology['post_section']
 
         if not pre_section:
             del self.topology['pre_section']
@@ -247,73 +290,153 @@ class ITP:
         # Make the order predictable
         if self.order_sections:
             for section, vals in self.topology.items():
-                if section not in ('pre_section', 'atoms'):
+                if section not in ('pre_section', 'post_section', 'atoms'):
                     vals[:] = sorted(vals)
 
     def write(self, outfile):
+        own_out = True
         try:
             OUT = open(outfile, 'w')
         except TypeError:
             OUT = outfile
-        with OUT:
-            for section, lines in self.topology.items():
-                if section != 'pre_section':
-                    print(f'[ {section} ]', file=OUT)
-                for line in lines:
-                    if is_comment_or_preprocessing(line):
-                        print(line[0], file=OUT)
-                        continue
-                    at_strs = ' '.join([f'{v:<3}' for v in
-                                        line[:self.at_ids[section]]])
-                    if self.at_ids[section] is None:  # exclusions special case
-                        print(f'  {at_strs}', file=OUT)
-                        continue
-                    xtra_strs = ' '.join([f'{v:<5}' for v in
-                                          line[self.at_ids[section]:]])
-                    print(f'  {at_strs}{" "*bool(at_strs)}{xtra_strs}',
-                          file=OUT)
+            own_out = False # To know whether to close it ourselves
+
+        for section, lines in self.topology.items():
+            if lines and section not in ('pre_section', 'post_section'):
+                print(f'[ {section} ]', file=OUT)
+
+            format_lens = get_format_lens(lines, self.at_ids[section])
+            for line in lines:
+                if is_comment_or_preprocessing(line):
+                    print(line[0], file=OUT)
+                    continue
+                line_str = ''
+                for val, fmt_len in zip(line, format_lens):
+                    line_str += f'  {val:<{fmt_len}}'
+                print(line_str, file=OUT)
+            if is_comment_or_preprocessing(line) != COMMENT: 
                 print(file=OUT)
-            print(file=OUT)
+        print(file=OUT)
+        if own_out:
+            OUT.close()
 
-    def renum(self, delta):
-        '''Adds delta to each atom index and returns a renumbered ITP
+    def reindex(self, new_index, just_renumber=False):
+        '''Reorders an itp and/or renumbers each atom interaction index.
 
+        New index list must be 1-based.
+        Can possibly also remove atoms, if not all indices are passed. 
         Does not change the ITP object in-place!
         '''
+        if just_renumber:
+            convert_dict = {old_id: new_id for old_id, new_id in enumerate(new_index, 1)}
+        else:
+            convert_dict = {old_id: new_id for new_id, old_id in enumerate(new_index, 1)}
+
         new_top = copy.deepcopy(self.topology)
         for directive, lines in new_top.items():
-            if directive == 'virtual_sitesn':
-                warnings.warn('This topology uses "virtual_sitesn", which '
-                              'cannot be automatically renumbered. Please '
-                              'correct those afterwards.')
             n_ats = self.at_ids[directive]
             if n_ats == 0: # moleculetype case
                 continue
+            new_directive = []
             for line in lines:
-                if is_comment_or_preprocessing(line):
+                try:
+                    new_line = line.copy() 
+                    if is_comment_or_preprocessing(new_line):
+                        pass
+                    elif directive == 'virtual_sitesn':
+                        change_ndx = list(range(len(new_line)))
+                        if new_line[1] == 3:
+                            del change_ndx[1::2]
+                        else:
+                            del change_ndx[1]
+                        for c_ndx in change_ndx:
+                            new_line[c_ndx] = convert_dict[new_line[c_ndx]]
+                    else:
+                        new_vals = [convert_dict[v] for v in new_line[:n_ats]]
+                        new_line[:n_ats] = new_vals
+                except KeyError:
                     continue
-                new_vals = [v + delta for v in line[:n_ats]]
-                line[:n_ats] = new_vals
+                new_directive.append(new_line)
+            lines[:] = new_directive
+
+        # Reorder chgrps
+        #cgrps = [at_line[5] for at_line in new_top['atoms']
+        #         if not is_comment_or_preprocessing(at_line)]
+        #new_idxs = list(range(1, len(cgrps) + 1))
+        #new_cgrps = []
+        #old_cgrp = None
+        #for cgrp in cgrps:
+        #    if cgrp == old_cgrp:
+        #        new_cgrps.append(new_cgrps[-1])
+        #    else:
+        #        new_cgrps.append(new_idxs.pop(0))
+        #    old_cgrp = cgrp
+
+        for at_line in new_top['atoms']:
+            if not is_comment_or_preprocessing(at_line):
+                #at_line[5] = new_cgrps.pop(0)
+                at_line[5] = at_line[0]
+
         return ITP(new_top, order_sections=False)
+
+    def renum(self, at_delta=0, res_delta=0):
+        '''Adds delta to each atom/residue index and returns a renumbered ITP
+
+        Does not change the ITP object in-place!
+        '''
+        new_index = [at_line[0] + at_delta for at_line in self.topology['atoms']
+                     if not is_comment_or_preprocessing(at_line)]
+        new_top = self.reindex(new_index, just_renumber=True)
+
+        if res_delta:
+            for at_line in new_top['atoms']:
+                if not is_comment_or_preprocessing(at_line):
+                    at_line[2] += res_delta
+
+        return new_top
 
     def register(self, parent_collection):
         self.parent_collection = parent_collection
         self.parent_collection[self.name] = self
 
+    def copy(self):
+        return ITP(self.topology)
+
     @classmethod
     def merge(cls, *itps, newname=None):
         new_itp = ITP(itps[0].topology)
-        for itp in itps[1:]:
-            for directive, lines in itp.topology.items():
-                if directive == 'moleculetype':
-                    continue
-                try:
-                    new_itp.topology[directive].extend(lines)
-                except KeyError:
-                    new_itp.topology[directive] = copy.deepcopy(lines)
+        for i, itp in enumerate(itps[1:]):
+            new_itp.append(itp)
         if newname is not None:
             new_itp.topology['moleculetype'][0][0] = newname
         return new_itp
+
+    def append(self, other):
+        other = other.renum(self.n_atoms, self.n_res)
+        for directive, lines in other.topology.items():
+            if directive == 'moleculetype':
+                continue
+            try:
+                self.topology[directive].extend(copy.deepcopy(lines))
+            except KeyError:
+                self.topology[directive] = copy.deepcopy(lines)
+
+    def __getitem__(self, key):
+        return self.topology[key]
+
+    @property
+    def n_atoms(self):
+        if not 'atoms' in self.topology:
+            return 0
+        return len([at_line for at_line in self.topology['atoms']
+                    if not is_comment_or_preprocessing(at_line)])
+
+    @property
+    def n_res(self):
+        if not 'atoms' in self.topology:
+            return 0
+        return len(set([at_line[2] for at_line in self.topology['atoms']
+                        if not is_comment_or_preprocessing(at_line)]))
 
 
 class ITPFile:
@@ -361,7 +484,7 @@ class ITPFile:
             if not start_lineno:
                 continue
             for count, prev_type in enumerate(linetypes[start_lineno-1::-1]):
-                if prev_type in ('directive_pre', 'val'):
+                if prev_type in ('val'):
                     mol_starts[mol_idx] -= count
                     break
             else:
@@ -375,15 +498,29 @@ class ITPFile:
                      order_sections=order_sections,
                      parent_collection=self)
             # The molecule self-registers, so no need to do it here
-            # self.molecules[itp.name] = itp
 
     def write(self, outfile):
         with open(outfile, 'w') as OUT:
             for molecule in self.molecules.values():
-                molecule.write(outfile)
+                molecule.write(OUT)
+
+    @property
+    def pre_section(self):
+        return self[0].topology.get('pre_section')
+
+    @property
+    def post_section(self):
+        return self[-1].topology.get('post_section')
 
     def __getitem__(self, key):
-        return self.molecules[key]
+        try:
+            return self.molecules[key]
+        except KeyError as err:
+            # Let's assume it's int indexing
+            try:
+                return list(self.molecules.values())[key]
+            except (TypeError, KeyError):
+                raise(err)
 
     def __setitem__(self, key, val):
         self.molecules[key] = val
@@ -483,7 +620,7 @@ class MolMaker(argparse.ArgumentParser):
         self.basename = self.gro.with_name(self.values.tmpprefix + self.name)
 
     def getmol(self):
-        mol_file = ITPFile(self.itp, keep_preprocessing=False,
+        mol_file = ITPFile(self.itp, keep_preprocessing=True,
                            keep_comments=False)
         molecules = mol_file.molecules
 
@@ -495,7 +632,7 @@ class MolMaker(argparse.ArgumentParser):
             self.molecule = molecules[list(molecules.keys())[0]]
         else:
             if self.values.mol is not None:
-                self.mol = molecules[self.values.mol]
+                self.molecule = molecules[self.values.mol]
             else:
                 molnames = '\n'.join(molecules.keys())
                 print(molnames)
@@ -512,12 +649,12 @@ class MolMaker(argparse.ArgumentParser):
 
             if 'bonds' not in self.molecule.topology:
                 # must add bonds, but ensure exclusions come last
-                bonds = self.molecule.topology['bonds'] = []
+                self.molecule.topology['bonds'] = []
                 if 'exclusions' in self.molecule.topology:
                     exc = self.molecule.topology.pop('exclusions')
                     self.molecule.topology['exclusions'] = exc
 
-            bonds.extend(newbonds)
+            self.molecule.topology['bonds'].extend(newbonds)
 
         self.run_itp = self.basename.with_suffix('.itp')
         self.molecule.write(self.run_itp)
