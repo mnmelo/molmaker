@@ -298,10 +298,11 @@ class ITP:
             own_out = False # To know whether to close it ourselves
 
         for section, lines in self.topology.items():
-            if lines and section not in ('pre_section', 'post_section'):
-                print(f'[ {section} ]', file=OUT)
+            if lines:
+                format_lens = get_format_lens(lines, self.at_ids[section])
+                if section not in ('pre_section', 'post_section'):
+                    print(f'[ {section} ]', file=OUT)
 
-            format_lens = get_format_lens(lines, self.at_ids[section])
             for line in lines:
                 if is_comment_or_preprocessing(line):
                     print(line[0], file=OUT)
