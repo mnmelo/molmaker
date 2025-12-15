@@ -628,7 +628,13 @@ class MolMaker(argparse.ArgumentParser):
             newbonds = copy.deepcopy(self.molecule.topology['constraints'])
             del self.molecule.topology['constraints']
             for bond in newbonds:
-                bond.append(1000000)
+                # Some constraints may already bring second values for the 'force'.
+                # We check and reset those.
+                if len(bond) < 5:
+                    bond.append(1000000)
+                else:
+                    bond[4] = 1000000
+
 
             if 'bonds' not in self.molecule.topology:
                 # must add bonds, but ensure exclusions come last
