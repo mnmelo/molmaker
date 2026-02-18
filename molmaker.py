@@ -445,18 +445,25 @@ class ITPFile:
         Constructs a dictionary of ITP instances; the actual used ITP class can
         be overriden as an argument, to allow for customization/subclassing.
 
+        itp_path may be an open file handle.
+
         The ITPFile instance is always passed as the first argument to ITPclass
         initialization.
         '''
-        self.itp_path = Path(itp_path)
         order_sections = not (keep_preprocessing or keep_comments)
         self.lines = []
-        for line in open(itp_path):
+        try:
+            self.itp_path = Path(itp_path)
+            itp_fh = open(itp_path)
+        except TypeError:
+            itp_fh = itp_path
+        for line in itp_fh:
             line = clean(line,
                          keep_preprocessing=keep_preprocessing,
                          keep_comments=keep_comments)
             if line:
                 self.lines.append(line)
+        itp_fh.close()
 
         linetypes = []
         mol_starts = []
