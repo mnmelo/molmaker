@@ -224,7 +224,8 @@ class ITP:
                 self.topology = copy.deepcopy(val_lists)
             except TypeError:
                 self.topology = {}
-                self._parse(val_lists)
+                self.topology = self._parse(val_lists,
+                                            order_sections=order_sections)
         # We register with the parent collection, if given
         if parent_collection is not None:
             if ('pre_section' not in self.topology
@@ -243,34 +244,29 @@ class ITP:
     def name(self, newname):
         self.topology['moleculetype'][0][0] = str(newname)
 
-    def _parse(self, val_lists):
-        curr_section = pre_section = self.topology['pre_section'] = []
+    @staticmethod
+    def _parse(val_lists, order_sections=False):
+        topology = {}
+        curr_section = pre_section = topology['pre_section'] = []
         for vals in val_lists:
             first_str = str(vals[0])
             if first_str.startswith('['): # new section
                 section = first_str[1:-1]
-                if curr_section is pre_section:
-                    if section != 'moleculetype':
-                        raise TypeError('Topology doesn\'t start with '
-                                        'directive "moleculetype"')
-                elif section == 'moleculetype':
-                    raise TypeError('Directive "moleculetype" is not first '
-                                    'in topology.')
-                curr_section = self.topology.setdefault(section, [])
+                curr_section = topology.setdefault(section, [])
             else:
                 if is_comment_or_preprocessing(vals):
-                    if self.order_sections:
+                    if order_sections:
                         raise ValueError('Section ordering was requested, but '
                                          'incompatible topology lines are '
                                          'present (either comment-only lines '
                                          'or preprocessing directives)')
                 elif curr_section is pre_section:
-                    raise ValueError(f'Non-comment/preprocessing line {vals} '
-                                     'before directive "moleculetype".')
+                    raise ValueError('Non-comment/preprocessing line before '
+                                     'first directive.')
                 curr_section.append(vals)
     
-        post_section = self.topology['post_section'] = []
-        for line in list(self.topology.values())[-1][::-1]:
+        post_section = topology['post_section'] = []
+        for line in list(topology.values())[-1][::-1]:
             if is_comment_or_preprocessing(line):
                 post_section.append(line)
             else:
@@ -278,16 +274,18 @@ class ITP:
         if post_section:
             post_section[:] = post_section[::-1]
         else:
-            del self.topology['post_section']
+            del topology['post_section']
 
         if not pre_section:
-            del self.topology['pre_section']
+            del topology['pre_section']
 
         # Make the order predictable
-        if self.order_sections:
-            for section, vals in self.topology.items():
+        if order_sections:
+            for section, vals in topology.items():
                 if section not in ('pre_section', 'post_section', 'atoms'):
                     vals[:] = sorted(vals)
+
+        return topology
 
     def write(self, outfile):
         own_out = True
@@ -494,19 +492,26 @@ class ITPFile:
             else:
                 mol_starts[mol_idx] = 0
 
-        # So that the zip trick works for the last slice
-        mol_starts.append(None)
         self.molecules = {}
-        for a, b in zip(mol_starts, mol_starts[1:]):
+        # Adding None so that the zip trick works for the last slice
+        for a, b in zip(mol_starts, mol_starts[1:] + [None]):
             ITPclass(self.lines[slice(a, b)],
                      order_sections=order_sections,
                      parent_collection=self)
             # The molecule self-registers, so no need to do it here
 
+        self.num_header_lines = len(self.lines) if not mol_starts else mol_starts[0]
+        self.header_topology = (ITPclass._parse(self.header_lines) if
+                                self.num_header_lines else None)
+
     def write(self, outfile):
         with open(outfile, 'w') as OUT:
             for molecule in self.molecules.values():
                 molecule.write(OUT)
+
+    @property
+    def header_lines(self):
+        return self.lines[:self.num_header_lines]
 
     @property
     def pre_section(self):
